@@ -71,7 +71,8 @@ class DBTable:
 			self.rows_cnt = table_rs[2]
 			self.createStr = table_rs[3]
 		else:
-			raise RuntimeError('No table `%s` found in database %s/%d:%s' % (str(s), ip, port, db))
+			raise RuntimeError('No table `%s` found in database %s/%d:%s' % (self.tableName, self.parentDb.ip, self.parentDb.port, self.parentDb.db))
+
 			exit()
 
 		self.forceIndex = []
@@ -890,7 +891,7 @@ def get_tables(dbInfo, sql):
 		for con in JOINONS.conditionsList:
 			WHERES.conditionsList.append(con)
 
-	print("查询条件: ", WHERES)
+	#print("查询条件: ", WHERES)
 	inds = []
 	if WHERES.size() > 0:
 		leftTables, rightTables, ops, inds = WHERES.check()
@@ -908,7 +909,7 @@ def get_tables(dbInfo, sql):
 				addMSG('[优化] 表%s较大(%d行)，查询为过去时间段，可以考虑放在从库执行' % (tbl.tableName, tbl.rows_cnt))
 	
 	if len(inds) > 0:
-		print(inds)
+		#print(inds)
 		#inds元素 [table, index_name, 列名, seq, cardinality, ASC|DESC]
 		keyname = ''
 		
@@ -954,7 +955,7 @@ def get_tables(dbInfo, sql):
 				alter_seq = ind[3]
 				alter_rows = ind[0].rows_cnt/ind[4]
 				alter_colname = "`%s`.`%s`" % (ind[0].tableName, ind[1])
-		print(allkeys)
+		#print(allkeys)
 
 		if len(possiblekeys) > 0:
 			addMSG('[执行计划] 该查询可能走的索引: %s' % ', '.join('`%s`.`%s`(基数%d, 约扫描%d行)' % (ind[0].tableName, ind[1], ind[4], ind[0].rows_cnt/ind[4]) for ind in possiblekeys))
