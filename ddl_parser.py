@@ -44,7 +44,10 @@ def updateDDL(LOG_FILE, mtimeStr):
 				valueStr = line1[:line1.replace('|', ' ').replace(',', ' ').index(' ')].strip()
 				if valueStr.isdigit():
 					vals_table[val] = int(valueStr)
-				else:
+				elif (not valueStr.isdigit()) and val == 'table_rows_cnt':
+					print("[ERROR] Invalide value %s for row_cnt" % valueStr)
+					
+				elif valueStr is not None and valueStr != 'NULL':
 					vals_table[val] = valueStr
 
 		for val in vals_imp.keys():
