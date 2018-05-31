@@ -8,17 +8,12 @@ import sqlparse, re
 from sqlparse.tokens import Keyword, Whitespace
 from DBHelper import Stack
 
-MDB_IP = '172.28.40.202'
-MDB_PORT = 3306
-MDB_USER = 'root'
-MDB_PWD = '123456'
-MDB_DB = 'sqlreviewer'
-
 sql_info = {"h":"", "P":"3306", "D":"", "e":""}
 
 CARDINALITY_LEAST = 100
 TABLE_ROWCNT_NEED_IDX = 100
 
+'''
 TABLES = []
 WHERES = None
 JOINONS = None
@@ -33,53 +28,92 @@ def addMSG(msg):
 		print(msg)
 		MSGS.append(msg)
 
+#def allMSG():
+#	return MSGS
+
+def reset():
+	TABLES = []
+	WHERES = None
+	JOINONS = None
+	MSGS = []
+'''
+
+class ParseResult:
+
+	def __init__(self):
+		self.dbInfo = None
+		self.sqls_parsed = ''
+		self.MSGS = []
+		self.dbmeta_source = '暂缺'
+
+		self.TABLES = []
+		self.WHERES = None
+		self.JOINONS = None
+		self.TIME_RANGES = {}
+
+	def setValues(self, dbInfo, sqls_parsed, msgs):
+		self.dbInfo = dbInfo
+		self.sqls_parsed = sqls_parsed
+		self.msgs = msgs
+		self.dbmeta_source = '暂缺'
+
+		if dbInfo is not None:
+			self.dbmeta_source = '%s:%d/%s' % (self.dbInfo.ip, self.dbInfo.port, self.dbInfo.db)
+	
+	def addMSG(self, msg):
+		if msg not in self.MSGS:
+			print(msg)
+			self.MSGS.append(msg)	
+
+	def reset(self):
+		self.dbmeta_source = '暂缺'
+		self.msgs = []
+		self.dbInfo = None
+		self.sql_parsed
+		self.TABLES = []
+		self.WHERES = None
+		self.JOINONS = None
+		self.TIME_RANGES = {}
+
 class DBInfo:
-	def __init__(self, ip, port, db):
+	def __init__(self, db_id, ip, port, db):
+		self.db_id = 0
 		self.ip = ip
 		self.port = port
 		self.db = db
-		self.db_id = 0
-
-		sql = 'select id from db_info where ip="%s" and port=%s and db="%s"' % (self.ip, self.port, self.db)
-		rs = dbase.fetchone(sql)
-		if rs is not None and len(rs)>0:
-			self.db_id = rs[0]
-		else:
-			raise RuntimeError("The specific DB is not found in our database.")
-			exit()
 
 #数据表
 class DBTable:
 
-	def __init__(self, db_info, tableToken, tableType):
+	def __init__(self, schema, ips, tableToken, tableType, result):
 		self.tableName = tableToken.get_real_name()
 		self.alias = ''
 		if tableToken.has_alias():
 			self.alias = tableToken.get_alias()
+		
+		ip_ports = []
 
-		self.parentDb = db_info
+		for ip in ips:
+			port = '3306'
+			if ':' in ip:
+				port = ip[ip.index(':')+1:]
+				ip = ip[:ip.index(':')]
+			ip_ports.append('(g.ip = "%s" and g.port = %s)' % (ip, port))
+
+		#self.parentDb = db_info
 		#通过from还是left/right/inner join
 		self.tableType = tableType
 		
 		self.tableId = 0
 		self.rows_cnt = 0
 		self.createStr = ''
-		table_sql = "select t.id, t.db_id, t.rows_cnt, t.create_str from table_info t, db_info db where db.ip = '%s' and db.port = %d and db = '%s' and db.id=t.db_id and t.table_name = '%s'" % (self.parentDb.ip, self.parentDb.port, self.parentDb.db, self.tableName)
-		table_rs = dbase.fetchone(table_sql)
-		if dbase.isfull(table_rs):
-			self.tableId = table_rs[0]
-			self.rows_cnt = table_rs[2]
-			self.createStr = table_rs[3]
-		else:
-			raise RuntimeError('No table `%s` found in database %s/%d:%s' % (self.tableName, self.parentDb.ip, self.parentDb.port, self.parentDb.db))
-
-			exit()
-
+		self.parentDb = None
+		self.update_time = ''
+		
 		self.forceIndex = []
-
+		
 		#元素：[列名, ESC/DESC]
 		self.orderBy = []
-		
 		self.groupBy = []
 		
 		#key为 表名.列名，value为DBColumn
@@ -87,34 +121,56 @@ class DBTable:
 		
 		#key为索引名, value为[列名1, 列名2], 有序
 		self.indexes = []
-
+		
 		#被使用的index
 		self.index_used = []
 		
 		#分层级存储在该表上的where条件，结构 {层级0: [Where0, where1], 层级1: [where0, where1]}
 		self.whereStrs = {}
+		
+		#table_sql = "select t.id, t.db_id, t.rows_cnt, t.create_str from table_info t where t.db_id = %d and t.table_name = '%s'" % (self.parentDb.db_id, self.tableName)
+		table_sql = 'select dbi.id, dbi.ip, dbi.port, t.id, t.update_time, t.rows_cnt, t.create_str from db_info dbi, table_info t, db_group_info g where %s and dbi.db="%s" and t.table_name="%s" and g.info_id=dbi.id and t.db_id=dbi.id order by t.update_time desc limit 1' % ('(%s)' % (' OR '.join(s for s in ip_ports) if len(ip_ports)>0 else '1=1'), schema, self.tableName)
+		table_rs = dbase.fetchone(table_sql)
+		if dbase.isfull(table_rs):
+			self.parentDb = DBInfo(table_rs[0], table_rs[1], table_rs[2], schema)
+			self.tableId = table_rs[3]
+			self.update_time = table_rs[4]
+			self.rows_cnt = table_rs[5]
+			self.createStr = table_rs[6]
 
-		self.init_Columns()
+			self.init_Columns(result)
+
+		else:
+			#raise RuntimeError('No table `%s` found in database %s/%d:%s' % (self.tableName, self.parentDb.ip, self.parentDb.port, self.parentDb.db))
+			sql = 'select dbi.id, dbi.ip, dbi.port, dbi.update_time from db_info dbi, db_group_info g where %s and dbi.db="%s" and g.info_id=dbi.id order by dbi.update_time desc limit 1;' % ('(%s)' % (' OR '.join(s for s in ip_ports) if len(ip_ports)>0 else '1=1'), schema)
+			db_rs = dbase.fetchall(sql)
+			if dbase.isfull(db_rs):
+				result.addMSG("* 未能在数据库%s中找到表%s，最后更新时间:%s，如果数据库元数据有误，请联系管理员" % (schema, self.tableName, db_rs[0][3]))
+			else:
+				result.addMSG("* 数据库%s的元数据暂未收集，不能进行sql解析，如有需要请联系管理员解锁新功能，谢谢：）" % schema)
+			
+			return None 
 
 	def __repr__(self):
 		return '%s alias %s' % (self.tableName, self.alias)
 
-	def init_Columns(self):
+	def init_Columns(self, result):
 		columns_sql = 'select col_name, col_type, first_seq, cardinality, discrim from table_columns where table_id=%d' % self.tableId
+		#print(columns_sql)
 		columns_rs = dbase.fetchall(columns_sql)
 		if dbase.isfull(columns_rs):
 			for c in columns_rs:
 				#self.columns[c[0].upper()] = DBColumn(c[0].upper(), self, c[1], c[2], c[3])
-				self.columns[c[0].upper()] = DBColumn(c[0].upper(), self)
+				self.columns[c[0].upper()] = DBColumn(result, c[0].upper(), self)
 	
-	def checkForceIndex(self):
+	def checkForceIndex(self, result):
 		for ind in self.forceIndex:
 			if ind not in self.indexes:
-				addMSG('[优化] 在表%s上使用了"force index(`%s`)"，却未在where中包含该索引中定义的列，导致sql无法走正确的索引。请去掉force index(`%s`)或者调整查询条件' % (self.tableName, ind, ind))
+				reusult.addMSG('[sql优化] 在表%s上使用了"force index(`%s`)"，却未在where中包含该索引中定义的列，导致sql无法走正确的索引。请去掉force index(`%s`)或者调整查询条件' % (self.tableName, ind, ind))
 
 #数据列
 class DBColumn:
-	def __init__(self, columnName, parentTable, columnType=None, first_seq=None, cardinality=0):
+	def __init__(self, result, columnName, parentTable, columnType=None, first_seq=None, cardinality=0):
 		self.columnId = 0
 		self.columnType = ''
 		self.columnName = columnName
@@ -146,7 +202,7 @@ class DBColumn:
 					if dbase.isfull(ind_rs):
 						for l in ind_rs:
 							self.columnIndexes[l[0]] = [l[1], l[2], l[3], l[4]]
-					self.judgeIndex()
+					self.judgeIndex(result)
 		else:
 			#print(columnName)
 			self.columnType = columnType
@@ -158,7 +214,7 @@ class DBColumn:
 
 	#判断列上的索引有效性
 	#返回值：[索引最靠前的列序号, 基数，错误提示信息]
-	def judgeIndex(self):
+	def judgeIndex(self, result):
 		ind_ids = []
 		#print(self.columnId)
 		for k in self.columnIndexes.keys():
@@ -168,7 +224,7 @@ class DBColumn:
 		
 		#该列为独立索引/联合索引第一列，但基数太低
 		if len(ind_ids) == 1 and self.columnIndexes[ind_ids[0]][2] < CARDINALITY_LEAST:
-			addMSG("[建议] 表%s的索引`%s`基数(第一列%s在表中不重复的个数)过低(%d), 索引效率过低" % (self.parentTable.tableName, self.columnIndexes[ind_ids[0]][0], self.columnName, self.columnIndexes[ind_ids[0]][2]))
+			result.addMSG("[索引建议] 表%s的索引`%s`基数(第一列%s在表中不重复的个数)过低(%d), 索引效率过低" % (self.parentTable.tableName, self.columnIndexes[ind_ids[0]][0], self.columnName, self.columnIndexes[ind_ids[0]][2]))
 
 		#单列索引 和 多列索引的第一列重合时，建议删除单列索引
 		singles = []
@@ -184,10 +240,10 @@ class DBColumn:
 					else:
 						singles.append(l[0])
 		if len(multis) > 0 and len(singles) > 0:
-			addMSG("[建议] 表%s的索引%s和%s中都以 %s 开头，有重复，可考虑去掉索引%s" % (self.parentTable.tableName, '、'.join('`%s`' % self.columnIndexes[id][0] for id in singles), '、'.join('`%s`' % self.columnIndexes[id][0] for id in multis), self.columnName, '、'.join('`%s`' % self.columnIndexes[id][0] for id in singles)))
+			result.addMSG("[索引建议] 表%s的索引%s和%s中都以 %s 开头，有重复，可考虑去掉索引%s" % (self.parentTable.tableName, '、'.join('`%s`' % self.columnIndexes[id][0] for id in singles), '、'.join('`%s`' % self.columnIndexes[id][0] for id in multis), self.columnName, '、'.join('`%s`' % self.columnIndexes[id][0] for id in singles)))
 						
-def findTableByName(tname):
-	for t in TABLES:
+def findTableByName(tname, result):
+	for t in result.TABLES:
 		if tname.upper() == t.tableName.upper() or tname.upper() == t.alias.upper():
 			return t
 	return None
@@ -204,10 +260,10 @@ FULLTEXT_STR = [(' MATCH ', ' AGAINST '), ]
 
 #有歧义的字符单独处理/不在同一列表中才算有歧义，如=和!=不算歧义
 #'||','&&'其实用不到
-AMBIGUOUS_map = {'=':['>=', '<='], '>':['->>', '>>', '>='], '<':['<<-', '<<', '<='], '|':['||', ], '&':['&&', ], ' IN ':[' NOT IN ',]}
+AMBIGUOUS_map = {'=':['!=', '>=', '<='], '!':['!=', ], '>':['->>', '>>', '>=', '<>'], '<':['<<-', '<<', '<=', '<>'], '|':['||', ], '&':['&&', ], ' IN ':[' NOT IN ',], ' IS ':[' IS NOT ', ]}
 
 #运算符，可单独使用
-OPRATORS_STR = ['%%', '&', '~', '|', '^', '->>', '>>', '->', '<<', '!', '+', '-', '*', '/']
+OPRATORS_STR = ['%%', '&', '~', '|', '^', '->>', '>>', '->', '<<', '!', '+', '-', '*', '/', ',']
 OPRATORS1_STR = [' MOD ', ' DIV ']
 
 #逻辑运算符，连接两个WhereConUni/WhereCon
@@ -285,31 +341,31 @@ class WhereConUni():
 							self.left_functions.append(f)
 	
 	def __repr__(self):
-		return "Uni(%s):[%s, %s, %s]" % (self.condition, self.left, self.condition_op, self.right if self.right1 == None else "%s, %s" % (self.right, self.right1))
+		return "Uni(%s):[%s/%s, %s, %s]" % (self.condition, self.left, ','.join(f for f in self.left_functions),self.condition_op, self.right if self.right1 == None else "%s, %s" % (self.right, self.right1))
 		#return self.condition
 
 #通过"表名.列名"获得表达式中的列名及其所属的表
 #返回[[列名,表名], [操作符, ]]
-def getTablesAndColumns(expression):
+def getTablesAndColumns(expression, result):
 		columns = []
 		#无需判断括号，并去掉``
 		#expression.expression.replace('(', ' ').replace(')', ' ').replace('`', '').strip()
 		expression.replace('`', '').strip()
 		if '.' not  in expression:
-			columns = getTableFromColumn(expression)
+			columns = getTableFromColumn(expression, result.TABLES)
 			return columns
 		while '.' in expression:
 			tname = expression[:expression.index('.')].strip()
-			if ' ' in tname:
-				tname = tname[tname.rfind(' ')+1:].strip()
-			if '{' in tname:
-				tname = tname[tname.rfind('{')+1:].strip()
+			
+			for op in [' ','{'] + OPRATORS_STR + OPRATORS1_STR:
+				if op in tname:
+					tname = tname[tname.rfind(op)+len(op):].strip()
 
 			cname = expression[expression.index('.')+1:].strip()
-			if ' ' in cname:
-				cname = cname[:cname.index(' ')].strip()
-			if '}' in cname:
-				cname = cname[:cname.index('}')].strip()
+			for op in [' ','{'] + OPRATORS_STR + OPRATORS1_STR:
+				if op in cname:
+					cname = cname[:cname.index(op)].strip()
+			
 			columns.append([cname, tname])
 
 			expression = expression[expression.index(cname)+len(cname):].strip()
@@ -317,7 +373,7 @@ def getTablesAndColumns(expression):
 
 #没有表名时，通过列名找到表
 #返回[[[列名,表名], ], [操作符，]]
-def getTableFromColumn(expression, tables=TABLES):
+def getTableFromColumn(expression, tables):
 		columns = []
 		ops = []
 		op = ''
@@ -422,7 +478,7 @@ class WhereCon():
 		elif isinstance(li, list) and len(li) == 1:
 			return self.is_Same(li[0])
 
-	def check(self, conType = None):
+	def check(self, result, conType = None):
 		leftTables = []
 		rightTables = []
 		ops = []
@@ -431,14 +487,13 @@ class WhereCon():
 		indexes = []
 		for con in self.conditionsList:
 			if isinstance(con, WhereCon):
-				leftTables, rightTables, ops, inds = con.check()
-				#print(con, leftTables, rightTables, ops, inds)
+				leftTables, rightTables, ops, inds = con.check(result)
 				#print(con.conditionsType, len(leftTables), self.is_Empty(rightTables), ops)
 				#判断是否or连接多个 列=数值，要求OR连接，左边为列，右边没有列，算式为EQUAL
 				
 				if con.conditionsType == 'OR' and len(leftTables) > 1 and self.is_Empty(rightTables) and ops == ['EQUAL', ]:
 					if self.is_Same(leftTables):
-						addMSG('[优化] "(%s)" 可修改为 "%s in (%s)" 以提高查询效率' % (' OR '.join(c.condition for c in con.conditionsList), con.conditionsList[0].left, ', '.join(str(c.right) for c in con.conditionsList)))
+						result.addMSG('[sql优化] "(%s)" 可修改为 "%s in (%s)" 以提高查询效率' % (' OR '.join(c.condition for c in con.conditionsList), con.conditionsList[0].left, ', '.join(str(c.right) for c in con.conditionsList)))
 						#print(leftTables) #[[['del_flag', 'a']], []], [[['del_flag', 'a']], []]
 
 				if (con.conditionsType == 'OR' and self.is_Same(leftTables) and len(inds)>0) or con.conditionsType == 'AND':
@@ -462,59 +517,73 @@ class WhereCon():
 							indexes.append(ind)
 					
 			elif isinstance(con, WhereConUni):
-				leftt = getTablesAndColumns(con.left)[0] if con.left is not None else None
+				leftt = getTablesAndColumns(con.left, result)[0] if con.left is not None else None
+				rightt = getTablesAndColumns(con.right, result)[0] if con.right is not None else None
 				if leftt is not None and not self.is_Empty(leftt):
-					leftTables.append(getTablesAndColumns(con.left))
+					leftTables.append(getTablesAndColumns(con.left, result))
 					#查询条件为 colName in (子查询)的情况
 					if con.condition_op == 'IN' and con.right.strip()[0] == '{' and con.right.strip()[-1] == '}' and con.right.strip().upper()[1:7] == 'SELECT':
-						addMSG("[优化] in的范围是子查询，效率较低，应改为联表查询形式")
+						result.addMSG("[sql优化] in的范围是子查询，效率较低，应改为联表查询形式")
 						continue
 
 					for lf in leftt:
-						left_table = findTableByName(lf[1])
+						left_table = findTableByName(lf[1], result)
 						
-						checkColumnType(left_table, lf[0], con.right, con.condition)
+						checkColumnType(left_table, lf[0], con.right, con.condition, result)
 
-						checkDatetime('left', left_table, lf[0], con.condition_op, con.right, con.right1)
+						checkDatetime(result, 'left', left_table, lf[0], con.condition_op, con.right, con.right1)
+						#print(con, lf, left_table, leftt[0][0].upper())
+						#print(left_table.columns.keys())
 						if left_table is not None and leftt[0][0].upper() in left_table.columns.keys():
 							leftc = left_table.columns[leftt[0][0].upper()]
 							#左侧有索引但使用了函数
-							if len(con.left_functions) > 0 and leftc.first_seq in (0, 1): 
-								addMSG("[优化] 列%s.%s上有索引，但只能单独放在算式左侧才能使用索引，请改变写法将%s()去除" % (left_table.tableName, lf[0], '、'.join(f for f in con.left_functions)))
+							if len(con.left_functions) > 0 and con.left_functions != ['IFNULL']:
+								if leftc.first_seq in (0, 1): 
+									result.addMSG("[sql优化] 列%s.%s上有索引，但只能单独放在算式左侧才能使用索引，请改变写法将%s去除" % (left_table.tableName, lf[0], '、'.join("%s()" % f for f in con.left_functions)))
 							
-							if leftc.first_seq is not None:
+							#左侧有索引
+							#右侧没有列
+							#右侧不是Null
+							#满足以上条件的情况下，才计入可走索引，否则进入联表判断
+							if leftc.first_seq is not None and self.is_Empty(rightt) and con.right.upper() != 'NULL' and con.right.upper() != 'NOT NULL':
 								sql = 'select ti.index_name, ci.seq_in_index, ci.cardinality, ci.orderby from table_indexes ti, cols_indexes ci where ci.col_id=%d and ti.table_id=%d and ci.index_id=ti.id order by ci.seq_in_index;' % (leftc.columnId, left_table.tableId)
 								ind_rs = dbase.fetchall(sql)
 								for l in ind_rs:
 									#去除重复（利用is_Same检验左侧的列是否相同来判断or是否走同一索引）
 									if [left_table, l[0], leftc.columnName, l[1], l[2], l[3]] not in indexes:
 										indexes.append([left_table, l[0], leftc.columnName, l[1], l[2], l[3]])
+							
+							if (leftc.first_seq is None or leftc.first_seq > 1) and ('DATE' in con.left.upper() or 'TIME' in con.left.upper()) and self.is_Empty(rightt) and con.right.upper() != 'NULL' and con.right.upper() != 'NOT NULL':
+								#时间字段加索引
+								msg = "[sql优化] 列%s.%s上无索引，通常时间字段上可以提供较好的区分度，请考虑添加索引" % (left_table.tableName, lf[0])
+								if len(con.left_functions) > 0 and con.left_functions != ['IFNULL']:
+									msg += ", 但只能单独放在算式左侧才能使用索引，请改变写法将%s去除" % '、'.join("%s()" % f for f in con.left_functions)
+								result.addMSG(msg)
 
-				rightt = getTablesAndColumns(con.right)[0] if con.right is not None else None
+				#rightt = getTablesAndColumns(con.right, result)[0] if con.right is not None else None
 				if rightt is not None and not self.is_Empty(rightt):
-					rightTables.append(getTablesAndColumns(con.right))
+					rightTables.append(getTablesAndColumns(con.right, result))
 					#判断是否是两表连接的条件: 左右均只有一个表（可能有特殊情况）、左右表不同
 					if not self.is_Empty(leftt) and len(leftt) == 1 and len(rightt) == 1 and len(leftt[0]) == 2 and len(rightt[0]) ==2 and rightt[0][1] is not None and rightt[0][1] != '' and leftt[0][1] is not None and leftt[0][1] != '' and leftt[0][1] != rightt[0][1]:
-						left_table = findTableByName(leftt[0][1])
-						right_table = findTableByName(rightt[0][1])
+						left_table = findTableByName(leftt[0][1], result)
+						right_table = findTableByName(rightt[0][1], result)
 						if left_table is not None and right_table is not None and '%s.%s' % (left_table.tableName,leftt[0][0].upper()) in left_table.columns.keys() and '%s.%s' % (right_table.tableName,rightt[0][0].upper()) in right_table.columns.keys():
-							leftc = left_table.columns['%s.%s' % (left_table.tableName,leftt[0][0].upper())]
-							rightc = right_table.columns['%s.%s' % (right_table.tableName,rightt[0][0].upper())]
+							leftc = left_table.columns['%s' % leftt[0][0].upper()]
+							rightc = right_table.columns['%s' % rightt[0][0].upper()]
 							if left_table.rows_cnt > TABLE_ROWCNT_NEED_IDX and leftc.first_seq not in (0, 1):
-								addMSG("[优化] 表%s较大（约%d行），连接字段%s需要索引" % (left_table.tableName, left_table.rows_cnt, leftt[0][0]))
+								result.addMSG("[sql优化] 表%s较大（约%d行），连接字段%s需要索引" % (left_table.tableName, left_table.rows_cnt, leftt[0][0]))
 							if right_table.rows_cnt > TABLE_ROWCNT_NEED_IDX and rightc.first_seq not in (0, 1):
-								addMSG("[优化] 表%s较大（约%d行），连接字段%s需要索引" % (right_table.tableName, right_table.rows_cnt, rightt[0][0]))
+								result.addMSG("[sql优化] 表%s较大（约%d行），连接字段%s需要索引" % (right_table.tableName, right_table.rows_cnt, rightt[0][0]))
 					else:
 						#检查索引列是否位于右侧
 						for col in rightt:
-							t = findTableByName(col[1])
-							checkColumnType(t, col[0], con.left, con.condition)
-							checkDatetime('right', t, col[0], con.condition_op, con.left)
-							if t is not None and '%s.%s' % (t.tableName,col[0].upper()) in t.columns.keys():
-								col_fullName = '%s.%s' % (t.tableName,col[0].upper())
-								c = t.columns[col_fullName]
+							t = findTableByName(col[1], result)
+							checkColumnType(t, col[0], con.left, con.condition, result)
+							checkDatetime(result, 'right', t, col[0], con.condition_op, con.left)
+							if t is not None and col[0].upper() in t.columns.keys():
+								c = t.columns[col[0].upper()]
 								if c.first_seq is not None and c.cardinality >= CARDINALITY_LEAST:
-									addMSG("[优化] 索引列%s位于条件%s右侧，将无法使用索引，请调整写法将其单独置于算式左侧" % (col[0], con.condition))
+									result.addMSG("[sql优化] 索引列%s位于条件%s右侧，将无法使用索引，请调整写法将其单独置于算式左侧" % (col[0], con.condition))
 					
 				if con.condition_op is not None and con.condition_op != '' and con.condition_op not in ops:
 					ops.append(con.condition_op)
@@ -522,29 +591,29 @@ class WhereCon():
 				print('Not reconginized condition %s', con)
 		return(leftTables, rightTables, ops, indexes)
 
-def checkColumnType(table, columnName, value, conditionStr):
+def checkColumnType(table, columnName, value, conditionStr, result):
 	if table is not None and columnName.upper() in table.columns.keys():
 		colType = table.columns[columnName.upper()].columnType
 		if '(' in colType:
 			colType = colType[:colType.index('(')]
 		if colType in ('bigint', 'decimal', 'double', 'int', 'mediumint', 'smallint', 'tinyint') and (value == '%s' or '"' in value or "'" in value):
-			addMSG("[优化] 条件%s中，列%s类型为%s，算式中的值为字符串，将引起强制转换，严重影响查询效率，请将两者改写一致" % (conditionStr, columnName, colType))
+			result.addMSG("[sql优化] 条件%s中，列%s类型为%s，算式中的值为字符串，将引起强制转换，严重影响查询效率，请将两者改写一致" % (conditionStr, columnName, colType))
 		elif colType in ('varchar', 'datetime', 'char', 'date', 'longblob', 'text', 'timestamp') and (value == '%n' or value.isdigit()):
-			addMSG("[优化] 条件%s中，列%s类型为%s，算式中的值为数字，将引起强制转换，严重影响查询效率，请将两者改写一致" % (conditionStr, columnName, colType))
+			result.addMSG("[sql优化] 条件%s中，列%s类型为%s，算式中的值为数字，将引起强制转换，严重影响查询效率，请将两者改写一致" % (conditionStr, columnName, colType))
 
-def checkDatetime(flag, table, col, op, value, value1 = None):
+def checkDatetime(result, flag, table, col, op, value, value1 = None):
 	if ('TIME' in col.upper() or 'DATE' in col.upper()) and op in ('RANGE_LEFT', 'RANGE_RIGHT', 'RANGE_BETWEEN'):
 		#print(flag, table, col, op, value)
 		fullname = '%s.%s' % (table.tableName.upper(), col.upper())
-		if fullname not in TIME_RANGES.keys():
-			TIME_RANGES[fullname] = [None, None]
+		if fullname not in result.TIME_RANGES.keys():
+			result.TIME_RANGES[fullname] = [None, None]
 		if op == 'RANGE_LEFT' and flag == 'left' or op == 'RANGE_RIGHT' and flag == 'right':
-			TIME_RANGES[fullname][0] = value
+			result.TIME_RANGES[fullname][0] = value
 		elif op == 'RANGE_RIGHT' and flag == 'left' or op == 'RANGE_LEFT' and flag == 'right':
-			TIME_RANGES[fullname][1] = value
+			result.TIME_RANGES[fullname][1] = value
 		elif op == 'RANGE_BETWEEN':
-			TIME_RANGES[fullname][0] = value
-			TIME_RANGES[fullname][1] = value1
+			result.TIME_RANGES[fullname][0] = value
+			result.TIME_RANGES[fullname][1] = value1
 
 def parse_Where(whereStr):
 	
@@ -759,7 +828,10 @@ def parse_Where(whereStr):
 	return whereCons
 
 
-def get_tables(dbInfo, sql):
+def get_tables(schema, ips, sql):
+	print("[输入] %s %s %s" % (schema, ','.join(str(ip) for ip in ips), sql))
+	result = ParseResult()
+
 	sql = sql.replace('\t', ' ').replace('\n', ' ').strip()
 	ts = sqlparse.parse(sql)[0]
 
@@ -771,6 +843,8 @@ def get_tables(dbInfo, sql):
 	isTable = False
 	tableType = None
 
+	isJoin = False 
+
 	isWhere = False
 
 	lastToken = None
@@ -779,49 +853,68 @@ def get_tables(dbInfo, sql):
 	ons = []
 
 	whereStr = ''
+	sqls_parsed = []
+
+	parsable = True
 
 	for s in ts.tokens:
 		sstr = ' '.join(filter(lambda x: x, str(s).split(' ')))
 		#print("token: '%s'" % (sstr.upper()))
-		if s.ttype != Whitespace and s.ttype != Keyword and isTable:
-			#print(sstr)
-			table = DBTable(dbInfo, s, tableType)
-			#print(table)
-			TABLES.append(table)
 
+		if s.ttype != Whitespace and s.ttype != Keyword and isTable:
+			#print('isTable:', sstr, isJoin)
 			isTable = False
 			lastToken = ''
+			
+			sqls_parsed[-1] += ' ' + sstr.strip()
 
-			if table.tableType == "FROM":
-				layer += 1
-				table_list = [table, ]
-				current_tables.push(table_list)
-			elif 'JOIN' in table.tableType and layer>=0:
-				tables_list = current_tables.peek()
-				tables_list.append(table)
+			if '(' in sstr and ')' in sstr and 'SELECT' in sstr[sstr.index('(') + 1:sstr.rfind(')')].upper():
+				isJoin = True
+			else:
+				table = DBTable(schema, ips, s, tableType, result)
+				if table.parentDb == None:
+					parsable = False
+				else:
+					result.TABLES.append(table)
+
+					if table.tableType == "FROM":
+						layer += 1
+						table_list = [table, ]
+						current_tables.push(table_list)
+					elif 'JOIN' in table.tableType and layer>=0:
+						tables_list = current_tables.peek()
+						tables_list.append(table)
 	
 		elif sstr.upper() == 'FORCE':
 			lastToken = 'FORCE'
 			isWhere = False
 
+			sqls_parsed[-1] += ' ' + sstr.strip()
+
 		elif sstr.upper()[:5] == 'INDEX' and lastToken == 'FORCE':
 			isWhere = False
 			isTable = False
+			
+			sqls_parsed[-1] += ' ' + sstr.strip()
+
 			lastToken = 'FORCE_INDEX'
 			if len(sstr) > 5:
 				st = sstr[5:].strip()
 				if st[0]=='(' and st[-1] == ')':
 					st = st[1:len(st)-1]
 					st = st.replace('`', '').replace(' ', '')
-					TABLES[-1].forceIndex = st.split(',')
+					result.TABLES[-1].forceIndex = st.split(',')
 					lastToken = ''
 
 		elif s.ttype != Whitespace and lastToken == 'FORCE_INDEX':
 			st = sstr.strip()
+
+			sqls_parsed[-1] += ' ' + st.strip()
+
 			if st[0]=='(' and st[-1] == ')':
 				st = st[1:len(st)-1].strip()
 				st = st.replace('`', '').replace(' ', '')
-				TABLES[-1].forceIndex = st.split(',')
+				result.TABLES[-1].forceIndex = st.split(',')
 			lastToken = ''
 			isWhere = False
 			isTable = False
@@ -831,6 +924,8 @@ def get_tables(dbInfo, sql):
 			isWhere = False
 			isTable = False
 
+			sqls_parsed[-1] += ' ' + sstr.strip()
+
 			cos = sstr.strip().split(',')
 			for co in cos:
 				co = co.strip()
@@ -839,9 +934,9 @@ def get_tables(dbInfo, sql):
 					esc = co[co.index(' ')+1:].upper()
 					co = co[:co.index(' ')]
 
-				a = getTablesAndColumns(co)
-				[tName, cName] = getTablesAndColumns(co)[0][0]
-				t = getTablesAndColumns(tName)
+				a = getTablesAndColumns(co, result)
+				[tName, cName] = a[0][0]
+				t = getTablesAndColumns(tName, result)
 				if t is not None:
 					if lastToken == 'ORDER_BY':
 						t.orderBy.append([cName, esc])
@@ -854,18 +949,25 @@ def get_tables(dbInfo, sql):
 			tableType = sstr.upper()
 			lastToken = tableType
 
-		elif sstr.upper() in ('ORDER', 'GROUP'):
+			sqls_parsed.append(sstr)
+
+		elif sstr.upper()[0:5] in ('ORDER', 'GROUP'):
 			lastToken = str(s).strip()
 			isWhere = False
 			isTable = False
 
+			sqls_parsed.append(sstr)
+
 		elif sstr.upper() == 'BY':
-			lastToken = '%s_%s' % (lastToken, str(s).strip())
+			#lastToken = '%s_%s' % (lastToken, str(s).strip().upper())
+			sqls_parsed[-1] += ' ' + sstr.strip()
 
 		elif sstr.upper() in ("ON", ):
 			isWhere = False
 			isTable = False
 			lastToken = 'ON'
+
+			sqls_parsed[-1] += ' ' + sstr.strip()
 
 		elif str(s).strip().upper()[:6] == "WHERE ":
 			isTable = False
@@ -873,47 +975,82 @@ def get_tables(dbInfo, sql):
 			lastToken = "WHERE"
 			whereStr = str(s).strip()[6:]
 
+			sqls_parsed.append(sstr)
+
 		elif s.ttype != Whitespace and lastToken == 'ON' and str(s).strip().upper() != 'AND':
 			ons.append(str(s).strip())
-			
-	if whereStr > '':
+			sqls_parsed[-1] += ' ' + sstr
+		
+		elif str(s).strip().upper()[:5] == "LIMIT":
+			isTable = False
+			isWhere = True
+			if lastToken == 'ORDER':
+				sqls_parsed[-1] += ' ' + sstr.strip()
+			else:
+				sqls_parsed.append(sstr)
+			lastToken = "LIMIT"
+
+		elif s.ttype != Whitespace and lastToken == "LIMIT":
+			if sqls_parsed[-1][-1] == '%':
+				sqls_parsed[-1] += sstr.strip()
+			else:
+				sqls_parsed[-1] += ' ' + sstr.strip()
+
+		elif lastToken == "WHERE":
+			sqls_parsed[-1] += ' ' + sstr.strip()
+
+		elif s.ttype != Whitespace:
+			sqls_parsed.append(sstr)
+
+	#for sql in sqls_parsed:
+	#	print("-",sql)
+
+	if isJoin:
+		result.addMSG("* FROM/联表子查询的优化功能尚未支持，敬请期待！")
+		#addMSG('\n* 以上结果为估算，可能与mysql优化器实际结果不一致，仅供参考\n* 改进建议/bug report请联系: zhouying@qianbao.com\n')
+		parsable = False
+
+	WHERES = None
+	
+	if parsable and whereStr > '':
 		WHERES = parse_Where(whereStr)
 		if isinstance(WHERES, WhereConUni):
 			WHERES = WhereCon([WHERES, ], 'AND')
 
-	if len(ons) > 0:
+	if parsable and len(ons) > 0:
 		onstr = ' AND '.join(on for on in ons)
 		#print(onstr)
-		JOINONS = parse_Where(onstr)
+		result.JOINONS = parse_Where(onstr)
 		#print(JOINONS)
-		if WHERES.getType() == 'OR':
+		if WHERES is not None and WHERES.getType() == 'OR':
 			WHERES = WhereCon([WHERES, ], 'AND')
-		for con in JOINONS.conditionsList:
+		for con in result.JOINONS.conditionsList:
 			WHERES.conditionsList.append(con)
 
-	#print("查询条件: ", WHERES)
+	print("查询条件: ", WHERES)
 	inds = []
-	if WHERES.size() > 0:
-		leftTables, rightTables, ops, inds = WHERES.check()
+	if parsable and WHERES is not None and WHERES.size() > 0:
+		leftTables, rightTables, ops, inds = WHERES.check(result)
 		#print(leftTables, rightTables, ops, inds)
 	
-	if len(TABLES) > 0:
-		for t in TABLES:
+	if parsable and len(result.TABLES) > 0:
+		for t in result.TABLES:
 			#print(t.orderBy, t.groupBy)
-			t.checkForceIndex()
+			t.checkForceIndex(result)
 
-	for t in TIME_RANGES.keys():
-		if TIME_RANGES[t][1] != None:
-			tbl = findTableByName(t[:t.index('.')])
+	for t in result.TIME_RANGES.keys():
+		if result.TIME_RANGES[t][1] != None:
+			tbl = findTableByName(t[:t.index('.')], result)
 			if tbl is not None and tbl.rows_cnt > TABLE_ROWCNT_NEED_IDX:
-				addMSG('[优化] 表%s较大(%d行)，查询为过去时间段，可以考虑放在从库执行' % (tbl.tableName, tbl.rows_cnt))
+				result.addMSG('[sql优化] 表%s较大(%d行)，查询为过去时间段，可以考虑放在从库执行' % (tbl.tableName, tbl.rows_cnt))
 	
-	if len(inds) > 0:
+	if parsable and len(inds) > 0:
 		#print(inds)
 		#inds元素 [table, index_name, 列名, seq, cardinality, ASC|DESC]
 		keyname = ''
 		
 		alter_colname = ''
+		alter_index = ''
 
 		mostcard = 0
 		alter_card = 0
@@ -954,29 +1091,37 @@ def get_tables(dbInfo, sql):
 				alter_card = ind[4]
 				alter_seq = ind[3]
 				alter_rows = ind[0].rows_cnt/ind[4]
-				alter_colname = "`%s`.`%s`" % (ind[0].tableName, ind[1])
+				alter_colname = "`%s`.`%s`" % (ind[0].tableName, ind[2])
+				alter_index = "`%s`" % ind[1]
 		#print(allkeys)
 
-		if len(possiblekeys) > 0:
-			addMSG('[执行计划] 该查询可能走的索引: %s' % ', '.join('`%s`.`%s`(基数%d, 约扫描%d行)' % (ind[0].tableName, ind[1], ind[4], ind[0].rows_cnt/ind[4]) for ind in possiblekeys))
+		
+		if len(possiblekeys) > 0 and len(possiblekeys)>1:
+			result.addMSG('[执行计划] 该查询可能走的索引: %s' % ', '.join('`%s`.`%s`(基数%d, 约扫描%d行)' % (ind[0].tableName, ind[1], ind[4], ind[0].rows_cnt/ind[4]) for ind in possiblekeys))
 		if keyname > '':
 			msg = '[执行计划] 该查询最可能走的索引: %s(基数%d, 约扫描%d行)' % (keyname, mostcard, mostcard_rows)
 			if mostcard < CARDINALITY_LEAST:
-				msg += '\n\t该索引基数过低，请根据业务需求和数据量大小进行调整'
+				msg += '    该索引基数过低，请根据业务需求和数据量大小进行调整'
 				
 				if alter_seq is not None and alter_card > CARDINALITY_LEAST:
-					msg += '\n\t列%s具有较高的基数%d，但位于联合索引的第%d列, 查询无法使用上面的索引，请考察联合索引顺序是否合理' % (alter_colname, alter_card, alter_seq)
-			addMSG(msg)
+					msg += '; 列%s具有较高的基数%d，但位于联合索引%s的第%d列, 查询无法使用上面的索引，请考察联合索引顺序是否合理' % (alter_colname, alter_card, alter_index, alter_seq)
+			result.addMSG(msg)
+	elif len(result.TABLES)>0:
+		result.addMSG('[执行计划] 该查询上无任何可用索引，请根据业务需求和数据量大小建合适索引')
+
+	if len(result.TABLES)>0:
+		result.addMSG('* 以上结果为估算，可能与mysql优化器实际结果不一致，仅供参考')
+		result.setValues(result.TABLES[0].parentDb, sqls_parsed, result.MSGS)
 	else:
-		addMSG('[执行计划] 该查询上无任何可用索引，请根据业务需求和数据量大小建合适索引')
-
-	addMSG('\n* 以上结果为估算，可能与mysql优化器实际结果不一致，仅供参考\n* 改进建议/bug report请联系: zhouying@qianbao.com\n')
-
+		result.setValues(None, sqls_parsed, result.MSGS)
 	
-def getQueryInfo(db_info, sql):
-	tables = get_tables(db_info, sql)
+	return result
+	
+def getQueryInfo(schema, ips, sql):
+	tables = get_tables(schema, ips, sql)
 	if len(tables) == 1:
 		return tables
+
 
 if __name__ == '__main__':
 	
@@ -1003,9 +1148,21 @@ if __name__ == '__main__':
 		argTag = ''
 
 	#检查服务器信息
-	if sql_info['h']>"" and sql_info['P']>"" and sql_info['P'].isdigit() and sql_info['D']>"" and sql_info['e']>"":
-		db = DBInfo(ip=sql_info['h'], port=int(sql_info['P']), db=sql_info['D'])
+	#if sql_info['h']>"" and sql_info['P']>"" and sql_info['P'].isdigit() and sql_info['D']>"" and sql_info['e']>"":
+	if sql_info['h']>"" and sql_info['D']>"" and sql_info['e']>"":
+		#格式 {'ip:端口','ip:端口'}
+		ips = []
+		if ',' in sql_info['h']:
+			ip_str = sql_info['h']
+			if '{' in ip_str and '}' in ip_str:
+				ip_str = ip_str[ip_str.index('{')+1:ip_str.index('}')].replace("'", "")
+			ips = ip_str.split(',')
+		else:
+			ips.append(ip_str[:-1].replace("'", ""))
+		schema = sql_info['D'][:-1].replace("'", "")
+		#db = DBInfo(ip=sql_info['h'], port=int(sql_info['P']), db=sql_info['D'])
 		sql = sql_info['e']
-		get_tables(db, sql)
+		#print(schema, ips)
+		get_tables(schema, ips, sql)
 	else:
 		raise RuntimeError("Sql info is incompleted")
