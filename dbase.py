@@ -6,10 +6,10 @@ import re, os, sys
 
 conn_dict = {}
 
-MDB_IP = '172.28.40.202'
+MDB_IP = '10.19.32.40'
 MDB_PORT = 3306
-MDB_USER = 'root'
-MDB_PWD = '123456'
+MDB_USER = 'smartqb'
+MDB_PWD = 'notsmart@All'
 MDB_DB = 'sqlreviewer'
 
 def getDateString(timer,format="%Y-%m-%d"):
@@ -17,10 +17,12 @@ def getDateString(timer,format="%Y-%m-%d"):
 
 #通过sql语句得到结果集
 def fetchall(sql, ip = None, port = None, user = None, pwd = None, db = None):
+	#print(sql)
 	MyDB = DBSource(ip, port, user, pwd, db)
 	return MyDB.get_result(sql)
 
 def fetchone(sql, ip = None, port = None, user = None, pwd = None, db = None):
+	#print(sql)
 	MyDB = DBSource(ip, port, user, pwd, db)
 	rowset = MyDB.get_result(sql)
 	for row in rowset:
@@ -28,7 +30,7 @@ def fetchone(sql, ip = None, port = None, user = None, pwd = None, db = None):
 
 #判断结果集是否为None
 def isfull(rowset):
-	if not rowset[0]:
+	if not rowset or not rowset[0]:
 		return False
 	else:
 		return True
@@ -51,6 +53,7 @@ def tostring(rowset,name,type=1):
 #保存
 def save(sql, ip = None, port = None, user = None, pwd = None, db = None):
 	MyDB = DBSource(ip, port, user, pwd, db)
+	#print(sql)
 	MyDB.save(sql)
 
 

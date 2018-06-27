@@ -2,7 +2,7 @@
 # -- coding: utf-8 --
 
 import datetime, time
-import re
+import re, hashlib
 import os, sys, socket
 
 class Stack(object):
@@ -98,4 +98,11 @@ def get_backupdisk_free():
 		backup_disk_free = largest_disk_free
 
 	return backup_disk_free
+
+def genearteMD5(str):
+	hl = hashlib.md5()
+	hl.update(str.encode(encoding='utf-8'))
+
+	return hl.hexdigest()
+
 
