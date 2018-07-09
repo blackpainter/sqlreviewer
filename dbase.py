@@ -19,12 +19,15 @@ def getDateString(timer,format="%Y-%m-%d"):
 def fetchall(sql, ip = None, port = None, user = None, pwd = None, db = None):
 	#print(sql)
 	MyDB = DBSource(ip, port, user, pwd, db)
-	return MyDB.get_result(sql)
+	rs = MyDB.get_result(sql)
+	#MyDB.close()
+	return rs
 
 def fetchone(sql, ip = None, port = None, user = None, pwd = None, db = None):
 	#print(sql)
 	MyDB = DBSource(ip, port, user, pwd, db)
 	rowset = MyDB.get_result(sql)
+	#MyDB.close()
 	for row in rowset:
 		return row
 
@@ -55,6 +58,7 @@ def save(sql, ip = None, port = None, user = None, pwd = None, db = None):
 	MyDB = DBSource(ip, port, user, pwd, db)
 	#print(sql)
 	MyDB.save(sql)
+	#MyDB.close()
 
 
 class DBSource:
@@ -81,7 +85,7 @@ class DBSource:
 			self._DB = db
 
 		self.get_conn(self._Host, self._DB, self._User, self._Passwd, self._Port)
-		self.get_cursor()
+		#self.get_cursor()
 
 	def get_conn(self, host=MDB_IP, db=MDB_DB, user=MDB_USER, passwd=MDB_PWD, port=MDB_PORT):
 		try:
@@ -123,6 +127,7 @@ class DBSource:
 			conn_dict[self._Host+"_"+self._DB+"_"+str(self._Port)] = None
 			self.get_connect()
 			self._cursor.execute(sql)
+			self.close()
 
 	#query
 	def get_result(self, sql):
@@ -138,6 +143,7 @@ class DBSource:
 			record = RecordSet([list(x) for x in rowset],[x[0].lower( ) for x in self._cursor.description])
 		else:
 			record = [None,]
+		self.close()
 		return record
 
 

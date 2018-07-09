@@ -14,31 +14,6 @@ sql_info = {"h":"", "P":"3306", "D":"", "e":""}
 CARDINALITY_LEAST = 100
 TABLE_ROWCNT_NEED_IDX = 100
 
-'''
-TABLES = []
-WHERES = None
-JOINONS = None
-
-MSGS = []
-
-#例：{'TABLENAME.CREATE_TIME':['2018-04-01', '2018-05-01']}
-TIME_RANGES = {}
-
-def addMSG(msg):
-	if msg not in MSGS:
-		print(msg)
-		MSGS.append(msg)
-
-#def allMSG():
-#	return MSGS
-
-def reset():
-	TABLES = []
-	WHERES = None
-	JOINONS = None
-	MSGS = []
-'''
-
 class ParseResult:
 
 	def __init__(self):
@@ -48,11 +23,13 @@ class ParseResult:
 		self.dbmeta_source = '暂缺'
 
 		self.TABLES = []
+		
 		self.WHERES = None
 		self.TIME_RANGES = {}
 		self.SELECTS = []
 
 		self.rows = 0
+		self.hit = False
 
 	def setValues(self, dbInfo, msgs):
 		self.dbInfo = dbInfo
@@ -80,12 +57,114 @@ class ParseResult:
 		self.SELECTS = []
 		self.rows = 0
 
+
+def getDBInfoMap():
+	db_infos = {}
+	db_sql = '(select concat(ip, "_", port, "_", db), id, update_time, ip, port, db from db_info) union (select concat(gi.ip, "_", gi.port, "_", dbi.db), dbi.id, dbi.update_time, gi.ip, gi.port, dbi.db from db_info dbi, db_group_info gi where gi.info_id=dbi.id)'
+	rs = dbase.fetchall(db_sql)
+	for l in rs:
+		db_infos[l[0]] = [l[1], l[2], l[3], l[4], l[5]]
+	return db_infos
+
+#当前已有元数据的库
+#key: ip_port_schema，value:[db_id, update_time, ip, port, schema]
+db_info_map = getDBInfoMap()
+
+def getDBIds_from_ips(ips, schema):
+	ip_ports = []
+	db_ids = []
+	for ip in ips:
+		port = '3306'
+		if ':' in ip:
+			port = ip[ip.index(':')+1:]
+			ip = ip[:ip.index(':')]
+
+		if "%s_%d_%s" % (ip, port, schema) in db_info_map.keys():
+			db_ids.append(db_info_map["%s_%d_%s" % (db_info_map)][0])
+
+	return db_ids
+
 class DBInfo:
 	def __init__(self, db_id, ip, port, db):
 		self.db_id = 0
 		self.ip = ip
 		self.port = port
 		self.db = db
+
+	def getDBid(self):
+		if db_id>0:
+			return db_id
+		elif "%s_%d_%s" % (self.ip, self.port, self.db) in db_info_map.keys():
+			return db_info_map["%s_%d_%s" % (self.ip, self.port, self.db)][0]
+		
+		return None
+		
+	def __repr__(self):
+		return 'DBInfo: %s:%s/%s, id=%d' % (self.ip, str(self.port), self.db, self.db_id)
+
+
+#根据一个/多个表名猜测查询属于哪个数据库（供测试sql使用）
+#返回：DBInfo实例(不支持跨库)
+def getDBInfo_from_tables(table_names_list):
+	realnames = []
+	schemas = []
+	for n in table_names_list:
+		n = str(n).replace('`','').strip()
+		if ' ' in n:
+			n = n[:n.index(' ')]
+		if '.' in n:
+			tablename = n[n.index('.')+1:].strip()
+			if tablename not in realnames:
+				realnames.append(tablename)
+			schema = n[:n.index('.')].strip()
+			if schema not in schemas:
+				schemas.append(schema)
+		else:
+			realnames.append(n)
+	if len(schemas)>1:
+		print('不支持跨库')
+		return None
+	tbs = ','.join('"%s"' % t for t in realnames)
+
+	sql = 'select dbi.id, dbi.ip, dbi.port, dbi.db, count(1) cnt from db_info dbi, table_info ti where ti.db_id=dbi.id and ti.table_name in (%s) %s group by dbi.id order by cnt desc, dbi.update_time desc limit 1' % (tbs, '' if len(schemas)==0 else 'and dbi.db="%s"' % schemas[0])
+
+	rs = dbase.fetchall(sql)
+	if dbase.isfull(rs) and rs[0][4] == len(table_names_list):
+		db_info = DBInfo(rs[0][0], rs[0][1], rs[0][2], rs[0][3])
+		db_info.db_id=rs[0][0]
+		return db_info
+	return None
+
+#子查询生成的衍生表
+class DerivedTable:
+	def __init__(self, name, tableType, sql, layer, dbInfo = None, source = 0):
+		self.tableName = name
+		self.alias = name
+		#通过from还是left/right/innerjoin/in子句 连接的子查询
+		self.tableType = tableType
+		self.sql = sql
+		self.layer = layer
+		self.result = ParseResult()
+
+		self.dbInfo = dbInfo
+		self.source = source
+
+	def guessDB(self):
+		#调用测试sql猜db的方法
+		self.dbInfo = get_tables(None, None, sql, 2, 0)
+		return self.dbInfo
+
+	def getParsedResult(self):
+		if self.dbInfo is None:
+			self.guessDB()
+			if self.dbInfo is None:
+				print("Cant get DbInfo from Derived Table:", self.name)
+				return None
+		
+		self.result = get_tables(self.dbInfo.schema, ["%s:%d" % (self.dbInfo.ip, self.dbInfo.port), ], self.sql, self.source, 0) 
+
+	def __repr__(self):
+		return '%s alias %s, drived table for %s clause' % (self.tableName, self.alias, tableType)
 
 #数据表
 class DBTable:
@@ -99,6 +178,7 @@ class DBTable:
 		ip_ports = []
 
 		for ip in ips:
+			ip = ip.replace('{','').replace('}', '')
 			port = '3306'
 			if ':' in ip:
 				port = ip[ip.index(':')+1:]
@@ -134,7 +214,7 @@ class DBTable:
 		self.whereStrs = {}
 		
 		#table_sql = "select t.id, t.db_id, t.rows_cnt, t.create_str from table_info t where t.db_id = %d and t.table_name = '%s'" % (self.parentDb.db_id, self.tableName)
-		table_sql = 'select dbi.id, dbi.ip, dbi.port, t.id, t.update_time, t.rows_cnt, t.create_str from db_info dbi, table_info t, db_group_info g where %s and dbi.db="%s" and t.table_name="%s" and g.info_id=dbi.id and t.db_id=dbi.id order by t.update_time desc limit 1' % ('(%s)' % (' OR '.join(s for s in ip_ports) if len(ip_ports)>0 else '1=1'), schema, self.tableName)
+		table_sql = 'select dbi.id, dbi.ip, dbi.port, t.id, t.update_time, t.rows_cnt, t.create_str from db_info dbi left join table_info t on t.db_id=dbi.id left join db_group_info g on g.info_id=dbi.id where %s and dbi.db="%s" and t.table_name="%s" order by t.update_time desc limit 1' % ('(%s)' % (' OR '.join(s for s in ip_ports) if len(ip_ports)>0 else '1=1'), schema, self.tableName)
 		table_rs = dbase.fetchone(table_sql)
 		if dbase.isfull(table_rs):
 			self.parentDb = DBInfo(table_rs[0], table_rs[1], table_rs[2], schema)
@@ -142,12 +222,13 @@ class DBTable:
 			self.update_time = table_rs[4]
 			self.rows_cnt = table_rs[5]
 			self.createStr = table_rs[6]
-
-			self.init_Columns(result)
+			
+			if not result.hit:
+				self.init_Columns(result)
 
 		else:
 			#raise RuntimeError('No table `%s` found in database %s/%d:%s' % (self.tableName, self.parentDb.ip, self.parentDb.port, self.parentDb.db))
-			sql = 'select dbi.id, dbi.ip, dbi.port, dbi.update_time from db_info dbi, db_group_info g where %s and dbi.db="%s" and g.info_id=dbi.id order by dbi.update_time desc limit 1;' % ('(%s)' % (' OR '.join(s for s in ip_ports) if len(ip_ports)>0 else '1=1'), schema)
+			sql = 'select dbi.id, dbi.ip, dbi.port, dbi.update_time from db_info dbi left join db_group_info g on g.info_id=dbi.id where %s and dbi.db="%s" order by dbi.update_time desc limit 1;' % ('(%s)' % (' OR '.join(s for s in ip_ports) if len(ip_ports)>0 else '1=1'), schema)
 			db_rs = dbase.fetchall(sql)
 			if dbase.isfull(db_rs):
 				result.addMSG("* 未能在数据库%s中找到表%s，最后更新时间:%s，如果数据库元数据有误，请联系管理员" % (schema, self.tableName, db_rs[0][3]))
@@ -617,7 +698,8 @@ class WhereCon():
 							t = findTableByName(col[1], result)
 							checkColumnType(t, col[0], con.left, con.condition, result)
 							checkDatetime(result, 'right', t, col[0], con.condition_op, con.left)
-							if t is not None and col[0].upper() in t.columns.keys():
+							#右侧有索引，左侧没有列(???)
+							if t is not None and col[0].upper() in t.columns.keys() and (self.is_Empty(leftt) or len(leftt) == 0):
 								c = t.columns[col[0].upper()]
 								if c.first_seq is not None and c.cardinality >= CARDINALITY_LEAST:
 									result.addMSG("[sql优化] 索引列%s位于条件%s右侧，将无法使用索引，请调整写法将其单独置于算式左侧" % (col[0], con.condition))
@@ -873,8 +955,7 @@ def parse_Where(whereStr):
 	#print(whereCons)
 	return whereCons
 
-def get_Cached(sql, result):
-	hit = False
+def get_Cached(sql, result, source = None, db_id = None):
 	
 	'''
 	db_info = {}
@@ -886,20 +967,25 @@ def get_Cached(sql, result):
 	'''
 
 	md5 = dbh.genearteMD5(sql)
-	db_sql = 'select pr.result_content, pr.scan_rows, pr.result_level from sql_cached sc, parse_result pr where sql_md5="%s" and sc.id=pr.sql_id and pr.is_latest=1' % md5
-	print(db_sql)
+
+	sql_s = 'sc.sql_md5="%s"' % md5
+
+	if source is not None:
+		sql_s += ' and sc.source=%d' % source
+	if db_id is not None:
+		sql_s += ' and sc.db_id=%d' % db_id
+
+	db_sql = 'select pr.result_content, pr.scan_rows, pr.result_level from sql_cached sc, parse_result pr where %s and sc.id=pr.sql_id and pr.is_latest=1' % sql_s
 	rs = dbase.fetchall(db_sql)
 	if dbase.isfull(rs):
 		msglist = rs[0][0].split('\n')
 		for m in msglist:
 			result.addMSG(m)
 		result.rows = rs[0][1]
-		hit = True
+		result.hit = True
 
-	return hit
+def get_tables(schema, ips, sql, source = 0, layer = 0):
 	
-
-def get_tables(schema, ips, sql, layer = 0):
 	result = ParseResult()
 
 	sql = sql.replace('\t', ' ').replace('\n', ' ').strip()
@@ -932,6 +1018,11 @@ def get_tables(schema, ips, sql, layer = 0):
 	whereStr = ''
 
 	parsable = True
+	
+	if source in [0, ]:
+		get_Cached(sql, result, source = source)
+
+	table_names_intest = []
 
 	for s in ts.tokens:
 		sstr = ' '.join(filter(lambda x: x, str(s).split(' ')))
@@ -942,26 +1033,36 @@ def get_tables(schema, ips, sql, layer = 0):
 			
 			result.sqls_parsed[-1] += ' ' + sstr.strip()
 
-			if '(' in sstr and ')' in sstr and 'SELECT' in sstr[sstr.index('(') + 1:sstr.rfind(')')].upper():
-				isJoin = True
-				if lastToken == 'FROM' and isAllCount>0:
-					isAllCount += 1
-				inner_queries.append([layer+1, lastToken.upper(), sstr[sstr.index('(') + 1:sstr.rfind(')')]])
-			else:
-				table = DBTable(schema, ips, s, tableType, result)
-				if table.parentDb == None:
-					parsable = False
+			if source in [0, ] or (source == 2 and schema is not None and ips is not None):
+				if '(' in sstr and ')' in sstr and 'SELECT' in sstr[sstr.index('(') + 1:sstr.rfind(')')].upper():
+					isJoin = True
+					if lastToken == 'FROM' and isAllCount>0:
+						isAllCount += 1
+					inner_sql = sstr[sstr.index('(') + 1:sstr.rfind(')')] 
+					inner_queries.append([layer+1, lastToken.upper(), inner_sql])
+					
+					dbInfo = None
+					if len(result.TABLES)>0 and result.TABLES[0].parentDb is not None:
+						dbInfo = result.TABLES[0].parentDb
+					table = DerivedTable(sstr[sstr.rfind(')') + 1:].strip(), lastToken.upper(), inner_sql, layer+1, dbInfo, source)
 				else:
-					result.TABLES.append(table)
+					table = DBTable(schema, ips, s, tableType, result)
+					if table.parentDb == None:
+						parsable = False
+					else:
+						result.TABLES.append(table)
+  
+						if table.tableType == "FROM":
+							#layer += 1
+							table_list = [table, ]
+							current_tables.push(table_list)
+							#elif 'JOIN' in table.tableType and layer>=0:
+						elif 'JOIN' in table.tableType and current_tables.size()>=1:
+							tables_list = current_tables.peek()
+							tables_list.append(table)
 
-					if table.tableType == "FROM":
-						#layer += 1
-						table_list = [table, ]
-						current_tables.push(table_list)
-						#elif 'JOIN' in table.tableType and layer>=0:
-					elif 'JOIN' in table.tableType and current_tables.size()>=1:
-						tables_list = current_tables.peek()
-						tables_list.append(table)
+			elif source == 2 and schema is None:
+				table_names_intest.append(s)
 
 			isTable = False
 			lastToken = ''
@@ -1000,6 +1101,10 @@ def get_tables(schema, ips, sql, layer = 0):
 					lastToken = ''
 
 		elif s.ttype != Whitespace and lastToken == 'FORCE_INDEX':
+			if source == 2 and schema is None:
+				lastToken = ''
+				continue
+			
 			st = sstr.strip()
 
 			result.sqls_parsed[-1] += ' ' + st.strip()
@@ -1115,6 +1220,9 @@ def get_tables(schema, ips, sql, layer = 0):
 		elif lastToken == "WHERE":
 			result.sqls_parsed[-1] += ' ' + sstr.strip()
 
+			if source == 2 and schema is None:
+				break
+
 		elif s.ttype != Whitespace:
 			result.sqls_parsed.append('\t'*layer + sstr)
 
@@ -1127,10 +1235,20 @@ def get_tables(schema, ips, sql, layer = 0):
 		#parsable = False
 	'''
 
-	if len(result.TABLES)>0:
-		hit = get_Cached(sql, result)
-		if hit:
-			return result
+	if source == 2 and schema is None:
+		dbInfo = None
+		if len(table_names_intest)>0:
+			dbInfo = getDBInfo_from_tables(table_names_intest)
+		'''
+		if dbInfo is not None:
+			return get_tables(dbInfo.db, "%s:%d" % (dbInfo.ip, dbInfo.port), sql, 2, 0)
+		else:
+			print("[ERROR] Can't find schema for sql:", sql)
+		'''
+		return dbInfo
+
+	if result.hit:
+		return result
 
 	WHERES = None
 	
@@ -1167,7 +1285,8 @@ def get_tables(schema, ips, sql, layer = 0):
 	if parsable and len(result.TABLES) > 0:
 		for t in result.TABLES:
 			#print(t.orderBy, t.groupBy)
-			t.checkForceIndex(result)
+			if isinstance(t, DBTable):
+				t.checkForceIndex(result)
 
 	for t in result.TIME_RANGES.keys():
 		if result.TIME_RANGES[t][1] != None:
@@ -1191,7 +1310,7 @@ def get_tables(schema, ips, sql, layer = 0):
 		alter_rows = 0
 
 		allkeys = {}
-		possiblekeys = []
+		possiblekeys = {}
 		flag = False
 		
 		#判断是否用到一个索引，先按"表名|索引名"归类，如果一个索引中的列按01234排列则可以用到索引，如果不以0/1开始则用不到
@@ -1226,8 +1345,11 @@ def get_tables(schema, ips, sql, layer = 0):
 					keyname = "`%s`.`%s`" % (ind[0].tableName, ind[1])
 				'''
 		for kname in allkeys.keys():
-			print(allkeys[kname])
+			#print(allkeys[kname])
 			card = 1
+			colnames = []
+			#colname = "`%s`.`%s`" % (allkeys[kname][0][0].tableName, allkeys[kname][0][2])
+			
 			if allkeys[kname][0][3] not in (0,1):
 				ind = allkeys[kname][0]
 				if ind[4]>alter_card:
@@ -1238,31 +1360,42 @@ def get_tables(schema, ips, sql, layer = 0):
 					alter_index = "`%s`" % ind[1]
 				continue
 			
+			else:
+				i = 1
+				mostcard1 = allkeys[kname][0][4]
+				colnames.append(allkeys[kname][0][2])
+				while i < len(allkeys[kname]):
+					if allkeys[kname][i][3]>allkeys[kname][i][3]+1:
+						break
+					mostcard1 *= allkeys[kname][i][4]
+					colnames.append(allkeys[kname][i][2])
+					i += 1
+	
+				'''
+				if [kname, mostcard1, allkeys[kname][0][0].rows_cnt/mostcard1] not in possiblekeys:
+					possiblekeys.append([kname, mostcard1, allkeys[kname][0][0].rows_cnt/mostcard1])
+				'''
+				if kname not in possiblekeys.keys() and len(colnames)>0 and mostcard1>0:
+					possiblekeys[kname] = [colnames, mostcard1, allkeys[kname][0][0].rows_cnt/mostcard1]
+				elif mostcard1>0:
+					print('Dup key?', kname, ": ", possiblekeys[kname], " and ", [colnames, mostcard1, allkeys[kname][0][0].rows_cnt/mostcard1])
 
-			i = 1
-			mostcard1 = allkeys[kname][0][4]
-			while i < len(allkeys[kname]):
-				if allkeys[kname][i][3]>allkeys[kname][i][3]+1:
-					break
-				mostcard1 *= allkeys[kname][i][4]
-				i += 1
-
-			if [kname, mostcard1, allkeys[kname][0][0].rows_cnt/mostcard1] not in possiblekeys:
-				possiblekeys.append([kname, mostcard1, allkeys[kname][0][0].rows_cnt/mostcard1])
-
-			if mostcard1 > mostcard:
-				mostcard = mostcard1
-				keyname = kname
+				if mostcard1 > mostcard:
+					mostcard = mostcard1
+					keyname = kname
 		
 		
-		mostcard_rows = allkeys[keyname][0][0].rows_cnt/mostcard
+		if keyname is not None and keyname>'':
+			mostcard_rows = allkeys[keyname][0][0].rows_cnt/mostcard
 
-		if len(possiblekeys) > 0 and len(possiblekeys)>1:
-			result.addMSG('[执行计划] 该查询可能走的索引: %s' % ', '.join('%s(基数%d, 约扫描%d行)' % (ind[0], ind[1], ind[2]) for ind in possiblekeys))
+		#print("pk:", possiblekeys)
+		
+		if len(possiblekeys.keys()) > 0:
+			result.addMSG('[执行计划] 该查询可能走的索引: %s' % '; '.join('%s(通过列%s, 基数%d, 约扫描%d行)' % (ind, '、'.join(c for c in possiblekeys[ind][0]), possiblekeys[ind][1], possiblekeys[ind][2]) for ind in possiblekeys.keys()))
 		if keyname > '':
 			msg = '[执行计划] 该查询最可能走的索引: %s(基数%d, 约扫描%d行)' % (keyname, mostcard, mostcard_rows)
 			if mostcard < CARDINALITY_LEAST:
-				msg += '，该索引基数过低，请根据业务需求和数据量大小进行调整'
+				msg += ', 该索引基数过低，请根据业务需求和数据量大小进行调整'
 
 				# 第二列以后的基数都是跟着第一列的，这里无法这样判断
 				#if alter_seq is not None and alter_card > mostcard and alter_card > CARDINALITY_LEAST:
@@ -1280,15 +1413,17 @@ def get_tables(schema, ips, sql, layer = 0):
 		result.addMSG("* FROM/联表子查询的优化功能尚未支持，敬请期待！")
 		
 	if len(result.TABLES)>0:
+		dbInfo = None
+		for t in result.TABLES:
+			if isinstance(t, DBTable) and t.parentDb is not None:
+				dbInfo = t.parentDb
 		result.addMSG('* 以上结果为估算，可能与mysql优化器实际结果不一致，仅供参考')
-		result.setValues(result.TABLES[0].parentDb, result.MSGS)
-	else:
-		result.setValues(None, result.MSGS)
+		result.setValues(dbInfo, result.MSGS)
 	
 	return result
 	
 def getQueryInfo(schema, ips, sql):
-	tables = get_tables(schema, ips, sql, 0)
+	tables = get_tables(schema, ips, sql, 0, 0)
 	if len(tables) == 1:
 		return tables
 
@@ -1333,6 +1468,6 @@ if __name__ == '__main__':
 		#db = DBInfo(ip=sql_info['h'], port=int(sql_info['P']), db=sql_info['D'])
 		sql = sql_info['e']
 		#print(schema, ips)
-		get_tables(schema, ips, sql, 0)
+		get_tables(schema, ips, sql, 0, 0)
 	else:
 		raise RuntimeError("Sql info is incompleted")
